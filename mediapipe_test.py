@@ -15,9 +15,10 @@ import time
 MODEL_URL="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
 MODEL_PATH="face_landmarker.task"
 
-
 if not os.path.exists(MODEL_PATH):
     urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+#loading the model ila runiti lprojet kitloada l fichier li fih preset model li howa face_landmarker.task
+    
 
 options=FaceLandmarkerOptions(
     base_options=BaseOptions(model_asset_path=MODEL_PATH),
@@ -28,6 +29,7 @@ options=FaceLandmarkerOptions(
     output_facial_transformation_matrixes=False
     
 )
+# FaceLandmarkerOptions howa constructeur li kayakhod les options dyal lmodel li ghadi nst3mlo 9aleb ela hadouk les parametres bash tfhemhoum 
 
 landmarker = FaceLandmarker.create_from_options(options)
 cap = cv2.VideoCapture(0)
@@ -56,5 +58,6 @@ while True:
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-
+# had lcode kaybda capture video mn webcam w kaydir loop 3la frames li kayjio mn webcam, kaydir flip lframe bach yban kima kayban lina f miroir, kayconverti lframe mn BGR l RGB 7it mediapipe kaykhdem b RGB, kaydir inference 3la lframe w kayaffichiha f wa7ed lwindow smitha "Face Mesh"
+#mli katrunner lcode ou kat7el randek l window "Face Mesh" ila werekty ela ' q ' fclavier katquitter hadik lwindow 
 
