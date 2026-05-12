@@ -1,1 +1,5 @@
 face_landmarker.task
+documentation.md
+architecture.md
+mediapipe_test.py
+
