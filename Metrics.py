@@ -146,10 +146,8 @@ def compute_head_pose(landmarks,w,h):
     
     # Convert rotation vector to rotation matrix, then to Euler angles
     rotation_mat, _ = cv2.Rodrigues(rotation_vec)
-    pose_mat = cv2.hconcat([rotation_mat, translation_vec])
-    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(
-        cv2.hconcat([pose_mat, np.array([[0, 0, 0, 1]], dtype=np.float64).T])
-    )
+    
+ 
  
     # decomposeProjectionMatrix is unreliable, use manual extraction
     sy = math.sqrt(rotation_mat[0, 0] ** 2 + rotation_mat[1, 0] ** 2)

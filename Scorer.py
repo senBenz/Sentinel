@@ -42,12 +42,12 @@ PERCLOS_EMERGENCY=0.50
 PITCH_EMERGENCY=40.0
 
 
-def _normalize(value,high,low):
-    if value >= low :
-      return 0.0 
-    elif value <= high:
-      return 100.0 
-    return ((value-low)/(high-low))*100
+def _normalize(value, low, high):
+    if value <= low:
+        return 0.0
+    elif value >= high:
+        return 100.0
+    return ((value - low) / (high - low)) * 100
 
 
 
@@ -61,13 +61,6 @@ def _normalize_blink_rate(rate):
     """
     if BLINK_RATE_NORMAL_LOW <= rate <= BLINK_RATE_NORMAL_HIGH:
         return 0.0
- 
-    if rate > BLINK_RATE_NORMAL_HIGH:
-        return _normalize(rate, BLINK_RATE_NORMAL_HIGH, BLINK_RATE_DANGER_HIGH)
-    
-    if BLINK_RATE_NORMAL_LOW <= rate <= BLINK_RATE_NORMAL_HIGH:
-        return 0.0
- 
     if rate > BLINK_RATE_NORMAL_HIGH:
         return _normalize(rate, BLINK_RATE_NORMAL_HIGH, BLINK_RATE_DANGER_HIGH)
     if rate <= BLINK_RATE_DANGER_LOW:
@@ -126,6 +119,7 @@ def check_emergency(snapshot: MetricsSnapshot) -> bool:
     if abs(snapshot.pitch) > PITCH_EMERGENCY:
         return True
     return False
- 
+
+
     
   
