@@ -19,20 +19,20 @@ LEVEL_THRESHOLDS = [0, 30, 55, 75, 90]
 
 
 ESCALATION_DELAYS = {
-    0: 0.0,    # instant (always in level 0 if score < 30)
-    1: 2.0,    # wait 2s before escalating from 0 to 1
-    2: 3.0,    # wait 3s before escalating from 1 to 2
-    3: 3.0,    # wait 3s before escalating from 2 to 3
-    4: 5.0,    # wait 5s (countdown) before escalating from 3 to 4
+    0: 0.0,   # instant reset to level 0
+    1: 3.0,   # 0 → 1 : 3s debounce — avoids triggering on a single slow blink
+    2: 4.0,   # 1 → 2 : 4s — sustained signal required before continuous alarm
+    3: 6.0,   # 2 → 3 : 6s — was 10s; genuine danger needs a faster response
+    4: 5.0,   # 3 → 4 : 5s final countdown, unchanged
 }
 
 
 DEESCALATION_DELAYS = {
-    3: 5.0,    # level 4 -> 3 : NOT POSSIBLE (level 4 = full stop)
-    2: 5.0,    # level 3 -> 2
-    1: 5.0,    # level 2 -> 1
-    0: 10.0,   # level 1 -> 0
-} 
+    3: 5.0,   # 4 → 3 : NOT POSSIBLE (level 4 = full stop, kept for dict completeness)
+    2: 3.0,   # 3 → 2 : 3s — quick feedback when driver responds to "take control"
+    1: 4.0,   # 2 → 1 : 4s — slightly faster than before
+    0: 6.0,   # 1 → 0 : 6s — was 10s; reduces "keeps buzzing while awake" annoyance
+}
 
 
 
@@ -71,12 +71,12 @@ class SoundManager:
     Manages all alert sounds using generated tones.
     No .wav files required. Everything is synthesized.
     """
- 
+
     def __init__(self):
-        self._playing = False
+        self._gen = 0          # incremented on every stop(); threads compare against this
         self._loop_thread = None
         self.sounds = {}
- 
+
         if HAS_SOUND:
             # Level 1: short gentle beep (800Hz, 150ms)
             self.sounds["beep"] = _generate_beep(800, 150, 0.3)
@@ -86,22 +86,23 @@ class SoundManager:
             self.sounds["urgent"] = _generate_beep(1500, 500, 0.8)
             # Level 4: emergency siren (2000Hz, 400ms)
             self.sounds["siren"] = _generate_beep(2000, 400, 1.0)
- 
+
     def play_once(self, sound_name):
         """Play a sound once."""
         self.stop()
         if HAS_SOUND and sound_name in self.sounds:
             self.sounds[sound_name].play()
- 
+
     def play_loop(self, sound_name, interval=1.0):
         """Play a sound repeatedly in a background thread."""
         self.stop()
-        self._playing = True
+        self._gen += 1
+        my_gen = self._gen
         self._loop_thread = threading.Thread(
-            target=self._loop, args=(sound_name, interval), daemon=True
+            target=self._loop, args=(sound_name, interval, my_gen), daemon=True
         )
         self._loop_thread.start()
- 
+
     def play_voice(self):
         """Play the voice alert file if it exists, otherwise use urgent tone."""
         self.stop()
@@ -115,17 +116,17 @@ class SoundManager:
                 pass
         # Fallback: use urgent tone
         self.play_loop("urgent", 0.8)
- 
+
     def stop(self):
         """Stop all sounds."""
-        self._playing = False
+        self._gen += 1         # invalidates any running loop thread
         if HAS_SOUND:
             pygame.mixer.stop()
             pygame.mixer.music.stop()
- 
-    def _loop(self, sound_name, interval):
-        """Background loop to repeat a sound."""
-        while self._playing:
+
+    def _loop(self, sound_name, interval, gen):
+        """Background loop to repeat a sound. Exits as soon as gen is stale."""
+        while self._gen == gen:
             if HAS_SOUND and sound_name in self.sounds:
                 self.sounds[sound_name].play()
             time.sleep(interval)
@@ -144,6 +145,7 @@ class AlertStateMachine:
         self._escalation_start = None
         self._deescalation_start = None
         self._cooldown_until = 0.0
+        self._emergency_cooldown_until = 0.0   # prevents emergency re-trigger spam
         self._sound = SoundManager()
  
     def update(self, score, emergency=False):
@@ -160,7 +162,9 @@ class AlertStateMachine:
         now = time.time()
  
         # Emergency override: jump to level 3 minimum
-        if emergency and self.level < 3:
+        # Cooldown of 15s prevents oscillation when pitch/PERCLOS hover at the threshold
+        if emergency and self.level < 3 and now >= self._emergency_cooldown_until:
+            self._emergency_cooldown_until = now + 15.0
             self._set_level(3, now)
             return self.level
  

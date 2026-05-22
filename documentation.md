@@ -425,3 +425,293 @@ La désescalade est volontairement plus lente que l'escalade pour éviter les os
 | Blink Duration | Durée moyenne des clignements | Détecte le ralentissement des paupières | 10% |
 | Head Pose | solvePnP sur landmarks faciaux | Détecte la perte de contrôle musculaire | 25% |
 | MAR (Yawn) | Landmarks de la bouche | Signal précoce de fatigue | 15% |
+
+
+
+
+
+##-------------------------------------------------------------------
+##-------------------------------------------------------------------
+##-------------------------------------------------------------------
+
+██╗   ██╗███████╗██████╗ ███████╗██╗ ██████╗ ███╗   ██╗    ██████╗ 
+██║   ██║██╔════╝██╔══██╗██╔════╝██║██╔═══██╗████╗  ██║    ╚════██╗
+██║   ██║█████╗  ██████╔╝███████╗██║██║   ██║██╔██╗ ██║     █████╔╝
+╚██╗ ██╔╝██╔══╝  ██╔══██╗╚════██║██║██║   ██║██║╚██╗██║    ██╔═══╝ 
+ ╚████╔╝ ███████╗██║  ██║███████║██║╚██████╔╝██║ ╚████║    ███████╗
+  ╚═══╝  ╚══════╝╚═╝  ╚═╝╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝    ╚══════╝
+
+
+##-------------------------------------------------------------------
+##-------------------------------------------------------------------
+##-------------------------------------------------------------------
+
+---
+
+## 7. LSTM — Scorer Temporel par Apprentissage Automatique
+
+### Problème du scorer actuel
+
+Le scorer actuel (`Scorer.py`) traite chaque `MetricsSnapshot` de manière **indépendante** : le score à l'instant *t* ne dépend que des métriques à l'instant *t+1*. Or, la fatigue est un phénomène **temporel** : une chute du blink rate qui survient 15 secondes après un pic de PERCLOS est bien plus significative que ces deux signaux pris séparément.
+
+```
+Exemple :
+  t=0s  : PERCLOS=0.10, blink_rate=18  → score=5   (normal)
+  t=15s : PERCLOS=0.30, blink_rate=8   → score=42  (somnolent)
+
+Scorer actuel : ne voit que t=15s, score=42
+LSTM          : voit la trajectoire t=0→15s, prédit niveau 2 car la chute est rapide
+```
+
+Le LSTM remplace `compute_fatigue_score()` dans `Scorer.py` par un modèle entraîné sur des séquences temporelles.
+
+---
+
+### Architecture du modèle
+
+```
+Entrée : séquence de T snapshots
+         shape = (batch, T, 8 features)
+
+                    ┌──────────────┐
+Snapshot t-T   ───▶ │              │
+Snapshot t-T+1 ───▶ │  LSTM x 2    │ hidden_size=64
+      ...      ───▶ │  couches     │
+Snapshot t     ───▶ │              │
+                    └──────┬───────┘
+                           │ dernier hidden state (64)
+                           ▼
+                    ┌──────────────┐
+                    │  Dropout 0.3 │
+                    └──────┬───────┘
+                           │
+                    ┌──────────────┐
+                    │  Linear(64→1)│
+                    └──────┬───────┘
+                           │
+                    ┌──────────────┐
+                    │  Sigmoid ×100│
+                    └──────┬───────┘
+                           ▼
+                    Score fatigue (0–100)
+```
+
+### Paramètres
+
+| Paramètre | Valeur | Justification |
+|-----------|--------|---------------|
+| Fenêtre temporelle T | 90 frames (~30s à 30fps) | Cohérent avec la fenêtre PERCLOS |
+| Features d'entrée | 8 | EAR, PERCLOS, blink_rate, blink_duration, pitch, yaw, roll, mar |
+| Hidden size | 64 | Suffisant pour capturer les patterns sans surapprentissage |
+| Nombre de couches LSTM | 2 | Permet d'apprendre des dépendances à deux échelles de temps |
+| Dropout | 0.3 | Régularisation entre les couches |
+| Sortie | 1 scalaire × 100 | Score 0–100, compatible avec AlertStateMachine existante |
+
+---
+
+### Données d'entraînement
+
+#### Datasets publics recommandés
+
+| Dataset | Contenu | Labels |
+|---------|---------|--------|
+| **NTHU Drowsy Driver** | Vidéos de conduite, multiples caméras | Drowsy / Non-drowsy par frame |
+| **UTA Real-Life Drowsiness** | Conduite réelle sur autoroute | Score de somnolence 0–4 |
+| **YawDD** | Conducteurs en situation de conduite simulée | Bâillements annotés |
+
+#### Format des données d'entraînement
+
+Chaque échantillon est une séquence de T `MetricsSnapshot` + un label de fatigue :
+
+```python
+X : np.array, shape (N, T, 8)
+    N = nombre de séquences
+    T = longueur de la fenêtre (90 frames)
+    8 = [ear, perclos, blink_rate, blink_duration_ms,
+         pitch, yaw, roll, mar]
+
+y : np.array, shape (N,)
+    Valeurs continues 0.0–1.0 (score normalisé)
+    ou classes {0, 1, 2, 3, 4} pour classification
+```
+
+#### Génération de données depuis Sentinel
+
+En l'absence de dataset externe, Sentinel peut **générer ses propres données** en mode enregistrement :
+
+```
+1. Lancer Orchestration.py en mode --record
+2. Enregistrer les MetricsSnapshot à chaque frame dans un CSV
+3. L'opérateur annote manuellement les fenêtres (fatigue / non-fatigue)
+4. Construire les séquences de longueur T avec stride=15 frames
+```
+
+---
+
+### Prétraitement des features
+
+Chaque feature est normalisée **indépendamment** sur ses valeurs physiologiques connues avant d'être passée au LSTM :
+
+```python
+FEATURE_RANGES = {
+    "ear":              (0.05, 0.40),
+    "perclos":          (0.00, 1.00),
+    "blink_rate":       (0.0,  40.0),
+    "blink_duration":   (50.0, 800.0),
+    "pitch":            (-45.0, 45.0),
+    "yaw":              (-60.0, 60.0),
+    "roll":             (-30.0, 30.0),
+    "mar":              (0.0,  1.0),
+}
+
+def normalize_snapshot(snapshot):
+    # Chaque valeur ramenée à [0, 1]
+    features = []
+    for key, (lo, hi) in FEATURE_RANGES.items():
+        value = getattr(snapshot, key)
+        features.append(max(0.0, min(1.0, (value - lo) / (hi - lo))))
+    return features
+```
+
+---
+
+### Intégration dans le pipeline Sentinel
+
+Le LSTM remplace `compute_fatigue_score()` dans `Orchestration.py` sans modifier aucun autre module :
+
+```
+Avant :
+  snapshot = tracker.update(landmarks, w, h)
+  score    = compute_fatigue_score(snapshot)       ← scorer à formule fixe
+
+Après :
+  snapshot = tracker.update(landmarks, w, h)
+  sequence_buffer.append(snapshot)                 ← file glissante de T frames
+  score    = lstm_scorer.predict(sequence_buffer)  ← scorer neuronal
+```
+
+```python
+class LSTMScorer:
+    def __init__(self, model_path, window=90):
+        self.window   = window
+        self.buffer   = deque(maxlen=window)
+        self.model    = load_model(model_path)   # TorchScript ou ONNX
+        self._warm    = False
+
+    def predict(self, snapshot):
+        self.buffer.append(normalize_snapshot(snapshot))
+        if len(self.buffer) < self.window:
+            # Fenêtre pas encore pleine : utiliser le scorer classique
+            return compute_fatigue_score(snapshot)
+        x = np.array(self.buffer, dtype=np.float32)   # (T, 8)
+        x = x[np.newaxis, ...]                         # (1, T, 8)
+        return float(self.model(x)) * 100.0
+```
+
+Le scorer classique fait office de **fallback** pendant les 30 premières secondes (fenêtre incomplète), garantissant un comportement correct dès le démarrage.
+
+---
+
+### Entraînement
+
+```python
+import torch
+import torch.nn as nn
+
+class SentinelLSTM(nn.Module):
+    def __init__(self, input_size=8, hidden=64, layers=2, dropout=0.3):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden, layers,
+                            batch_first=True, dropout=dropout)
+        self.head = nn.Sequential(
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        # x : (batch, T, 8)
+        out, _ = self.lstm(x)
+        return self.head(out[:, -1, :]).squeeze(-1)  # dernier hidden state
+
+
+# Entraînement
+model     = SentinelLSTM()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+loss_fn   = nn.MSELoss()   # régression de score
+
+for epoch in range(50):
+    for X_batch, y_batch in dataloader:
+        pred = model(X_batch)
+        loss = loss_fn(pred, y_batch)
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+# Export pour production
+torch.jit.script(model).save("sentinel_lstm.pt")
+```
+
+### Métriques d'évaluation
+
+| Métrique | Cible | Description |
+|----------|-------|-------------|
+| MAE | < 8 points | Erreur moyenne sur le score 0–100 |
+| Précision niveau | > 85% | % de niveaux d'alerte correctement prédits |
+| Taux faux positifs | < 5% | Alertes déclenchées sur conducteur alerte |
+| Latence inférence | < 10ms | Temps de prédiction sur CPU embarqué |
+
+---
+
+### Comparaison scorer actuel vs LSTM
+
+| Critère | Scorer à formule | LSTM |
+|---------|-----------------|------|
+| Données requises | Aucune | Dataset annoté |
+| Dépendances temporelles | Non | Oui |
+| Adaptabilité au conducteur | Non | Possible (fine-tuning) |
+| Interprétabilité | Totale | Limitée (boîte noire) |
+| Latence | < 1ms | 5–10ms |
+| Robustesse sans visage | Bonne (score=0) | Nécessite padding |
+| Recommandé pour MVP | Oui | Non (v2+) |
+
+Le scorer à formule reste la référence pour le MVP. Le LSTM est l'amélioration naturelle une fois qu'un jeu de données de sessions de conduite réelles est disponible.
+
+
+
+
+exacution.  steps. : 
+Step 1 — Record a session (generates labeled CSV)
+    python3 Orchestration.py --record session.csv
+
+  Step 2 — Train the model on that CSV
+    python3 lstm_train.py --data session.csv --out sentinel_lstm.pt
+
+  Step 3 — Run with the trained LSTM
+    python3 Orchestration.py --lstm sentinel_lstm.pt
+
+  Step 4 — Once model is good, record with LSTM labels for refinement
+    python3 Orchestration.py --lstm sentinel_lstm.pt --record session2.csv
+
+  For Step 1, the session should ideally cover both alert and fatigued states to
+   give the LSTM varied training data — simulate drowsiness (slow blinks, head
+  drops, yawns) as well as normal attentive driving. A 10–15 minute session at
+  30fps generates ~18,000–27,000 rows, which builds ~1,200–1,800 sequences of 90
+   frames with stride=15.
+
+  For Step 2, the minimum viable command is:
+  python3 lstm_train.py --data session.csv
+
+  All other parameters have sensible defaults (50 epochs, hidden=64, window=90).
+   If training loss plateaus early you can increase --epochs 100.
+
+  Ready to record a session? Run Step 1, and once you have session.csv ready,
+  come back for Step 2.
+
+##retrain with :
+
+python3 lstm_train.py --data session2.csv --epochs 100
+
+
+
+  
